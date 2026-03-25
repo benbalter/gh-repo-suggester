@@ -85,12 +85,22 @@ JQ_ORG='
 echo "Fetching watched repos and repos in $ORG..." >&2
 
 gh api /user/subscriptions --paginate --jq "$JQ_WATCHED" \
-  | jq -s 'add | .[0:100]' > "$TMPDIR/watched.json" &
+  | jq -s 'add // [] | .[0:100]' > "$TMPDIR/watched.json" 2>"$TMPDIR/watched-err.txt" &
+PID_W=$!
 
 gh api "/orgs/${ORG}/repos?per_page=100&sort=updated&direction=desc" --paginate --jq "$JQ_ORG" \
-  | jq -s 'add' > "$TMPDIR/org.json" &
+  | jq -s 'add // []' > "$TMPDIR/org.json" 2>"$TMPDIR/org-err.txt" &
+PID_O=$!
 
-wait
+FETCH_FAILED=false
+wait "$PID_W" || FETCH_FAILED=true
+wait "$PID_O" || FETCH_FAILED=true
+
+if $FETCH_FAILED; then
+  echo "Error fetching repos:" >&2
+  cat "$TMPDIR/watched-err.txt" "$TMPDIR/org-err.txt" >&2
+  exit 1
+fi
 
 WATCHED=$(cat "$TMPDIR/watched.json")
 ORG_REPOS=$(cat "$TMPDIR/org.json")
@@ -124,10 +134,6 @@ echo "Asking $MODEL to pick $COUNT from $CANDIDATE_COUNT candidates..." >&2
 
 # ── Build prompt ─────────────────────────────────────────────────────
 
-WATCHED_LIST=$(echo "$WATCHED" | jq -r '
-  .[] | "- \(.name) (\(.language)): \(.description) [topics: \(.topics)]"
-')
-
 CANDIDATE_LIST=$(echo "$CANDIDATES" | jq -r '
   .[] | "- \(.name) (\(.language), \(.stars)★): \(.description) [topics: \(.topics), discussions: \(.has_discussions), issues: \(.has_issues)]"
 ')
@@ -140,7 +146,8 @@ candidate repos in a specific organization.
 ## Your process
 
 1. Identify 3-5 interest themes from the user's watched repos (e.g. languages,
-   domains, tooling patterns).
+   domains, tooling patterns). If the user has no watched repos, recommend the
+   most broadly useful and popular repos from the candidates.
 2. Score each candidate repo against those themes.
 3. Select the top candidates, preferring diversity across themes over clustering
    on a single theme.
@@ -170,7 +177,11 @@ Return ONLY the recommendations in this exact format (no preamble, no summary):
 Use just the repo name (without the org prefix).
 SYSTEM_EOF
 
-read -r -d '' USER_PROMPT <<USER_EOF || true
+if [ "$WATCHED_COUNT" -gt 0 ]; then
+  WATCHED_LIST=$(echo "$WATCHED" | jq -r '
+    .[] | "- \(.name) (\(.language)): \(.description) [topics: \(.topics)]"
+  ')
+  read -r -d '' USER_PROMPT <<USER_EOF || true
 Recommend ${COUNT} repos from the "${ORG}" organization for me to watch.
 
 ## My currently watched repos:
@@ -179,29 +190,48 @@ ${WATCHED_LIST}
 ## Candidate repos in ${ORG}:
 ${CANDIDATE_LIST}
 USER_EOF
+else
+  read -r -d '' USER_PROMPT <<USER_EOF || true
+Recommend the ${COUNT} most interesting and broadly useful repos from the "${ORG}" organization for me to watch. I'm not currently watching any repos, so base your picks on repo quality, popularity, and coverage of the org's key projects.
 
-# ── Call GitHub Models ───────────────────────────────────────────────
+## Candidate repos in ${ORG}:
+${CANDIDATE_LIST}
+USER_EOF
+fi
+
+# ── Call GitHub Models (streamed) ────────────────────────────────────
 
 BODY=$(jq -n --arg model "$MODEL" --arg system "$SYSTEM_PROMPT" --arg user "$USER_PROMPT" '{
   model:       $model,
   messages:    [{role: "system", content: $system}, {role: "user", content: $user}],
-  temperature: 0.7
+  temperature: 0.7,
+  stream:      true
 }')
-
-HTTP_CODE=$(curl -s -o "$TMPDIR/models-resp.json" -w '%{http_code}' \
-  "https://models.github.ai/inference/chat/completions" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "$BODY")
-
-if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-  echo "Error: GitHub Models returned HTTP $HTTP_CODE" >&2
-  jq -r '.error.message // .message // .' "$TMPDIR/models-resp.json" >&2 2>/dev/null || cat "$TMPDIR/models-resp.json" >&2
-  exit 1
-fi
 
 echo "" >&2
 
-# ── Output ───────────────────────────────────────────────────────────
-
-jq -r '.choices[0].message.content' "$TMPDIR/models-resp.json"
+set +e
+curl -sS -N \
+  "https://models.github.ai/inference/chat/completions" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$BODY" 2>"$TMPDIR/curl-err.txt" | {
+  ERROR=""
+  while IFS= read -r line; do
+    case "$line" in
+      "data: [DONE]") ;;
+      "data: "*)
+        printf '%s' "${line#data: }" | jq -rj '.choices[0].delta.content // empty' ;;
+      "{"*)
+        ERROR="$line"
+        break ;;
+    esac
+  done
+  echo ""
+  if [ -n "$ERROR" ]; then
+    echo "$ERROR" | jq -r '"Error: " + (.error.message // .message // "unknown error")' >&2 2>/dev/null \
+      || echo "Error: $ERROR" >&2
+    exit 1
+  fi
+} || exit 1
+set -e
