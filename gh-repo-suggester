@@ -59,23 +59,19 @@ fi
 # ── Fetch data via gh api (uses existing auth — no PAT needed) ───────
 
 TOKEN=$(gh auth token)
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "Fetching your watched repos..." >&2
-WATCHED=$(gh api /user/subscriptions --paginate --jq '
-  .[] | {
+JQ_WATCHED='
+  [.[] | {
     name:        .full_name,
     description: (.description // ""),
     language:    (.language // "unknown"),
     topics:      ((.topics // []) | join(", "))
-  }
-' | jq -s '.[0:100]')
+  }]'
 
-WATCHED_COUNT=$(echo "$WATCHED" | jq 'length')
-echo "  Found $WATCHED_COUNT watched repos" >&2
-
-echo "Fetching repos in $ORG..." >&2
-ORG_REPOS=$(gh api "/orgs/${ORG}/repos?per_page=100&sort=updated&direction=desc" --paginate --jq '
-  .[] | select(.archived != true) | {
+JQ_ORG='
+  [.[] | select(.archived != true) | {
     name:            .full_name,
     description:     (.description // ""),
     language:        (.language // "unknown"),
@@ -83,11 +79,28 @@ ORG_REPOS=$(gh api "/orgs/${ORG}/repos?per_page=100&sort=updated&direction=desc"
     stars:           .stargazers_count,
     has_discussions:  (.has_discussions // false),
     has_issues:       (.has_issues // false)
-  }
-' | jq -s '.')
+  }]'
 
+# Fetch watched repos (first 100) and org repos (first 200) in parallel
+echo "Fetching watched repos and repos in $ORG..." >&2
+
+gh api "/user/subscriptions?per_page=100" --jq "$JQ_WATCHED" \
+  > "$TMPDIR/watched.json" &
+
+gh api "/orgs/${ORG}/repos?per_page=100&sort=updated&direction=desc&page=1" --jq "$JQ_ORG" \
+  > "$TMPDIR/org1.json" &
+
+gh api "/orgs/${ORG}/repos?per_page=100&sort=updated&direction=desc&page=2" --jq "$JQ_ORG" \
+  > "$TMPDIR/org2.json" &
+
+wait
+
+WATCHED=$(cat "$TMPDIR/watched.json")
+ORG_REPOS=$(jq -s 'add' "$TMPDIR/org1.json" "$TMPDIR/org2.json")
+
+WATCHED_COUNT=$(echo "$WATCHED" | jq 'length')
 ORG_COUNT=$(echo "$ORG_REPOS" | jq 'length')
-echo "  Found $ORG_COUNT repos in $ORG" >&2
+echo "  $WATCHED_COUNT watched repos, $ORG_COUNT repos in $ORG" >&2
 
 # ── Filter ───────────────────────────────────────────────────────────
 
@@ -165,7 +178,7 @@ BODY=$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" '{
   temperature: 0.7
 }')
 
-HTTP_CODE=$(curl -s -o /tmp/gh-repo-suggester-resp.json -w '%{http_code}' \
+HTTP_CODE=$(curl -s -o "$TMPDIR/models-resp.json" -w '%{http_code}' \
   "https://models.github.ai/inference/chat/completions" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -173,8 +186,7 @@ HTTP_CODE=$(curl -s -o /tmp/gh-repo-suggester-resp.json -w '%{http_code}' \
 
 if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
   echo "Error: GitHub Models returned HTTP $HTTP_CODE" >&2
-  jq -r '.error.message // .message // .' /tmp/gh-repo-suggester-resp.json >&2 2>/dev/null || cat /tmp/gh-repo-suggester-resp.json >&2
-  rm -f /tmp/gh-repo-suggester-resp.json
+  jq -r '.error.message // .message // .' "$TMPDIR/models-resp.json" >&2 2>/dev/null || cat "$TMPDIR/models-resp.json" >&2
   exit 1
 fi
 
@@ -182,5 +194,4 @@ echo "" >&2
 
 # ── Output ───────────────────────────────────────────────────────────
 
-jq -r '.choices[0].message.content' /tmp/gh-repo-suggester-resp.json
-rm -f /tmp/gh-repo-suggester-resp.json
+jq -r '.choices[0].message.content' "$TMPDIR/models-resp.json"
