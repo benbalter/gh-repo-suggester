@@ -60,7 +60,7 @@ fi
 
 TOKEN=$(gh auth token)
 
-echo "Fetching your watched repos…" >&2
+echo "Fetching your watched repos..." >&2
 WATCHED=$(gh api /user/subscriptions --paginate --jq '
   .[] | {
     name:        .full_name,
@@ -73,7 +73,7 @@ WATCHED=$(gh api /user/subscriptions --paginate --jq '
 WATCHED_COUNT=$(echo "$WATCHED" | jq 'length')
 echo "  Found $WATCHED_COUNT watched repos" >&2
 
-echo "Fetching repos in $ORG…" >&2
+echo "Fetching repos in $ORG..." >&2
 ORG_REPOS=$(gh api "/orgs/${ORG}/repos?per_page=100&sort=updated&direction=desc" --paginate --jq '
   .[] | select(.archived != true) | {
     name:            .full_name,
@@ -110,7 +110,7 @@ if [ "$CANDIDATE_COUNT" -eq 0 ]; then
   exit 0
 fi
 
-echo "Asking $MODEL to pick $COUNT from $CANDIDATE_COUNT candidates…" >&2
+echo "Asking $MODEL to pick $COUNT from $CANDIDATE_COUNT candidates..." >&2
 
 # ── Build prompt ─────────────────────────────────────────────────────
 
