@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# gh-repo-suggester — recommend repos to watch in a GitHub org
+set -euo pipefail
+
+VERSION="1.0.0"
+
+usage() {
+  cat <<EOF
+Recommend repos to watch in a GitHub org, powered by GitHub Models.
+
+USAGE
+  gh repo-suggester <org> [flags]
+
+FLAGS
+  -n, --count <N>       Number of recommendations (default: 5)
+  -m, --model <ID>      GitHub Models model ID (default: openai/gpt-4o-mini)
+  -t, --topic <TOPIC>   Filter candidate repos by topic
+  -h, --help            Show this help
+  --version             Show version
+
+EXAMPLES
+  gh repo-suggester github
+  gh repo-suggester my-org --count 10
+  gh repo-suggester my-org --topic api --model openai/gpt-4o
+EOF
+}
+
+# ── Parse arguments ──────────────────────────────────────────────────
+
+COUNT=5
+MODEL="openai/gpt-4o-mini"
+TOPIC=""
+ORG=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--count)   COUNT="$2"; shift 2 ;;
+    -m|--model)   MODEL="$2"; shift 2 ;;
+    -t|--topic)   TOPIC="$2"; shift 2 ;;
+    -h|--help)    usage; exit 0 ;;
+    --version)    echo "gh-repo-suggester $VERSION"; exit 0 ;;
+    -*)           echo "Unknown flag: $1" >&2; usage >&2; exit 1 ;;
+    *)            ORG="$1"; shift ;;
+  esac
+done
+
+if [ -z "$ORG" ]; then
+  echo "Error: org argument is required" >&2
+  echo "" >&2
+  usage >&2
+  exit 1
+fi
+
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq is required. Install it: https://jqlang.github.io/jq/download/" >&2
+  exit 1
+fi
+
+# ── Fetch data via gh api (uses existing auth — no PAT needed) ───────
+
+TOKEN=$(gh auth token)
+
+echo "Fetching your watched repos…" >&2
+WATCHED=$(gh api /user/subscriptions --paginate --jq '
+  .[] | {
+    name:        .full_name,
+    description: (.description // ""),
+    language:    (.language // "unknown"),
+    topics:      ((.topics // []) | join(", "))
+  }
+' | jq -s '.[0:100]')
+
+WATCHED_COUNT=$(echo "$WATCHED" | jq 'length')
+echo "  Found $WATCHED_COUNT watched repos" >&2
+
+echo "Fetching repos in $ORG…" >&2
+ORG_REPOS=$(gh api "/orgs/${ORG}/repos?per_page=100&sort=updated&direction=desc" --paginate --jq '
+  .[] | select(.archived != true) | {
+    name:            .full_name,
+    description:     (.description // ""),
+    language:        (.language // "unknown"),
+    topics:          ((.topics // []) | join(", ")),
+    stars:           .stargazers_count,
+    has_discussions:  (.has_discussions // false),
+    has_issues:       (.has_issues // false)
+  }
+' | jq -s '.')
+
+ORG_COUNT=$(echo "$ORG_REPOS" | jq 'length')
+echo "  Found $ORG_COUNT repos in $ORG" >&2
+
+# ── Filter ───────────────────────────────────────────────────────────
+
+if [ -n "$TOPIC" ]; then
+  ORG_REPOS=$(echo "$ORG_REPOS" | jq --arg t "$TOPIC" '
+    [.[] | select(.topics | ascii_downcase | contains($t | ascii_downcase))]
+  ')
+  echo "  Filtered to $(echo "$ORG_REPOS" | jq 'length') repos matching topic \"$TOPIC\"" >&2
+fi
+
+WATCHED_NAMES=$(echo "$WATCHED" | jq '[.[].name]')
+CANDIDATES=$(echo "$ORG_REPOS" | jq --argjson w "$WATCHED_NAMES" '
+  [.[] | select(.name as $n | ($w | index($n)) | not)] | .[0:200]
+')
+
+CANDIDATE_COUNT=$(echo "$CANDIDATES" | jq 'length')
+if [ "$CANDIDATE_COUNT" -eq 0 ]; then
+  echo "" >&2
+  echo "No unwatched repos found in $ORG — you're already watching them all! 👀"
+  exit 0
+fi
+
+echo "Asking $MODEL to pick $COUNT from $CANDIDATE_COUNT candidates…" >&2
+
+# ── Build prompt ─────────────────────────────────────────────────────
+
+WATCHED_LIST=$(echo "$WATCHED" | jq -r '
+  .[] | "- \(.name) (\(.language)): \(.description) [topics: \(.topics)]"
+')
+
+CANDIDATE_LIST=$(echo "$CANDIDATES" | jq -r '
+  .[] | "- \(.name) (\(.language), ★\(.stars)): \(.description) [topics: \(.topics), discussions: \(.has_discussions), issues: \(.has_issues)]"
+')
+
+read -r -d '' PROMPT <<PROMPT_EOF || true
+You recommend GitHub repositories to watch. Given the user's currently watched repos (showing their interests), pick the ${COUNT} best repos from the "${ORG}" organization for them to watch.
+
+## User's currently watched repos:
+${WATCHED_LIST}
+
+## Candidate repos in ${ORG}:
+${CANDIDATE_LIST}
+
+## GitHub watching types:
+- All Activity — every notification (issues, PRs, releases, discussions, etc.)
+- Issues and Pull Requests — stay in the loop on development activity
+- Releases Only — get notified of new versions
+- Discussions — follow community conversations
+- Security Alerts — stay aware of vulnerabilities
+
+Return EXACTLY ${COUNT} recommendations (or fewer if there aren't enough good matches).
+For each, output this format:
+
+### <number>. <org>/<repo-name>
+
+**Suggested watch type:** <one of the watching types above>
+
+<One-sentence reason tied to the user's watched repos or interests, and why the suggested watch type fits>
+
+Choose the watch type based on the repo's characteristics:
+- Recommend "Releases Only" for libraries or tools the user likely depends on
+- Recommend "Discussions" for repos with discussions enabled that match community interests
+- Recommend "Issues and Pull Requests" for repos the user might want to contribute to
+- Recommend "Security Alerts" for dependencies or security-sensitive repos
+- Recommend "All Activity" only for repos closely aligned with the user's core work
+
+Do NOT recommend repos the user already watches. Be specific about *why* each repo matches.
+PROMPT_EOF
+
+# ── Call GitHub Models ───────────────────────────────────────────────
+
+BODY=$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" '{
+  model:       $model,
+  messages:    [{role: "user", content: $prompt}],
+  temperature: 0.7
+}')
+
+HTTP_CODE=$(curl -s -o /tmp/gh-repo-suggester-resp.json -w '%{http_code}' \
+  "https://models.github.ai/inference/chat/completions" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$BODY")
+
+if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+  echo "Error: GitHub Models returned HTTP $HTTP_CODE" >&2
+  jq -r '.error.message // .message // .' /tmp/gh-repo-suggester-resp.json >&2 2>/dev/null || cat /tmp/gh-repo-suggester-resp.json >&2
+  rm -f /tmp/gh-repo-suggester-resp.json
+  exit 1
+fi
+
+echo "" >&2
+
+# ── Output ───────────────────────────────────────────────────────────
+
+jq -r '.choices[0].message.content' /tmp/gh-repo-suggester-resp.json
+rm -f /tmp/gh-repo-suggester-resp.json

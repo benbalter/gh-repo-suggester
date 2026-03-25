@@ -1,44 +1,50 @@
-# Repo Suggester
+# gh-repo-suggester
 
-A GitHub Action that recommends repositories to watch within an organization, powered by [GitHub Models](https://github.com/marketplace/models).
+A `gh` CLI extension that recommends repositories to watch within a GitHub organization, powered by [GitHub Models](https://github.com/marketplace/models).
 
 It looks at your watched repos to understand your interests, then picks the best matches from an org's repo catalog using AI — and suggests the most appropriate **watching type** for each (All Activity, Releases Only, Discussions, etc.).
 
-## Usage
+## Install
 
-```yaml
-permissions:
-  models: read
-
-steps:
-  - uses: benbalter/repo-suggester@main
-    with:
-      org: my-org
+```
+gh extension install benbalter/gh-repo-suggester
 ```
 
-That's it — uses the built-in `GITHUB_TOKEN` with the `models: read` permission. No PAT needed.
+Requires [`jq`](https://jqlang.github.io/jq/download/).
 
-## Inputs
+## Usage
 
-| Input   | Required | Default              | Description                                          |
-| ------- | -------- | -------------------- | ---------------------------------------------------- |
-| `org`   | ✅       |                      | GitHub organization to recommend repos from          |
-| `token` |          | `${{ github.token }}`| GitHub token (default works with `models: read`)     |
-| `model` |          | `openai/gpt-4o-mini` | [GitHub Models](https://github.com/marketplace/models) model ID |
-| `count` |          | `5`                  | Number of repos to recommend                         |
-| `topic` |          |                      | Optional topic filter to narrow candidate repos      |
+```
+gh repo-suggester <org> [flags]
+```
 
-## Outputs
+### Flags
 
-| Output            | Description                                          |
-| ----------------- | ---------------------------------------------------- |
-| `recommendations` | Markdown-formatted recommendations with watch types  |
+| Flag                 | Default              | Description                                          |
+| -------------------- | -------------------- | ---------------------------------------------------- |
+| `-n`, `--count <N>`  | `5`                  | Number of repos to recommend                         |
+| `-m`, `--model <ID>` | `openai/gpt-4o-mini` | [GitHub Models](https://github.com/marketplace/models) model ID |
+| `-t`, `--topic <T>`  |                      | Filter candidate repos by topic                      |
+| `-h`, `--help`       |                      | Show help                                            |
+
+### Examples
+
+```bash
+# Recommend 5 repos from the "github" org
+gh repo-suggester github
+
+# Get 10 recommendations filtered to API-related repos
+gh repo-suggester my-org --count 10 --topic api
+
+# Use a different model
+gh repo-suggester my-org --model openai/gpt-4o
+```
 
 ## How it works
 
-1. Fetches your watched repos (up to 100) as interest signals
+1. Fetches your watched repos (up to 100) via `gh api` — **no PAT needed**, uses your existing `gh` auth
 2. Lists repos in the target org (excluding ones you already watch and archived repos)
-3. Sends both lists to a GitHub Models LLM along with each repo's metadata (language, topics, discussions/issues enabled, stars)
+3. Sends both lists to a GitHub Models LLM along with each repo's metadata (language, topics, whether discussions/issues are enabled, stars)
 4. Returns ranked recommendations, each with a **suggested watch type**:
    - **All Activity** — for repos closely aligned with your core work
    - **Issues and Pull Requests** — for repos you might contribute to
@@ -46,42 +52,12 @@ That's it — uses the built-in `GITHUB_TOKEN` with the `models: read` permissio
    - **Discussions** — for repos with active community conversations
    - **Security Alerts** — for dependencies or security-sensitive repos
 
-Results appear in the **Actions job summary** and are available via the `recommendations` output.
+## Auth
 
-## Permissions
+Uses your existing `gh auth` token — no extra secrets or PATs required. Just make sure you're logged in:
 
-Add `models: read` to your workflow permissions — this gives the `GITHUB_TOKEN` access to GitHub Models:
-
-```yaml
-permissions:
-  models: read
 ```
-
-No PAT or additional secrets required.
-
-## Example: weekly digest
-
-```yaml
-name: Suggest repos
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 9 * * 1'
-
-permissions:
-  models: read
-
-jobs:
-  suggest:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: benbalter/repo-suggester@main
-        id: suggest
-        with:
-          org: my-org
-          count: 10
-
-      - run: echo "${{ steps.suggest.outputs.recommendations }}"
+gh auth status
 ```
 
 ## License
