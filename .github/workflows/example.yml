@@ -1,0 +1,17 @@
+name: Suggest repos
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * 1' # Every Monday at 9 AM UTC
+
+permissions:
+  contents: read
+
+jobs:
+  suggest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: benbalter/repo-suggester@main
+        with:
+          org: github
+          token: ${{ secrets.MODELS_PAT }}

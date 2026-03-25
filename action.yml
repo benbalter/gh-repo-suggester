@@ -1,0 +1,37 @@
+name: 'Repo Suggester'
+description: >-
+  Recommends repositories to follow within a GitHub organization
+  based on your starred repos, powered by GitHub Models.
+
+inputs:
+  org:
+    description: 'GitHub organization to recommend repos from'
+    required: true
+  token:
+    description: >-
+      GitHub token with `read:org`, `read:user` scopes and GitHub Models access.
+      Must not be the default GITHUB_TOKEN — use a PAT or GitHub App token.
+    required: true
+  model:
+    description: 'GitHub Models model ID'
+    required: false
+    default: 'openai/gpt-4o-mini'
+  count:
+    description: 'Number of repos to recommend'
+    required: false
+    default: '5'
+  topic:
+    description: 'Optional topic filter to narrow org repos (e.g. "api")'
+    required: false
+
+outputs:
+  recommendations:
+    description: 'Markdown-formatted repo recommendations'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
+
+branding:
+  icon: 'star'
+  color: 'purple'
