@@ -81,22 +81,19 @@ JQ_ORG='
     has_issues:       (.has_issues // false)
   }]'
 
-# Fetch watched repos (first 100) and org repos (first 200) in parallel
+# Fetch watched repos and org repos in parallel (both fully paginated)
 echo "Fetching watched repos and repos in $ORG..." >&2
 
-gh api "/user/subscriptions?per_page=100" --jq "$JQ_WATCHED" \
-  > "$TMPDIR/watched.json" &
+gh api /user/subscriptions --paginate --jq "$JQ_WATCHED" \
+  | jq -s 'add | .[0:100]' > "$TMPDIR/watched.json" &
 
-gh api "/orgs/${ORG}/repos?per_page=100&sort=updated&direction=desc&page=1" --jq "$JQ_ORG" \
-  > "$TMPDIR/org1.json" &
-
-gh api "/orgs/${ORG}/repos?per_page=100&sort=updated&direction=desc&page=2" --jq "$JQ_ORG" \
-  > "$TMPDIR/org2.json" &
+gh api "/orgs/${ORG}/repos?per_page=100&sort=updated&direction=desc" --paginate --jq "$JQ_ORG" \
+  | jq -s 'add' > "$TMPDIR/org.json" &
 
 wait
 
 WATCHED=$(cat "$TMPDIR/watched.json")
-ORG_REPOS=$(jq -s 'add' "$TMPDIR/org1.json" "$TMPDIR/org2.json")
+ORG_REPOS=$(cat "$TMPDIR/org.json")
 
 WATCHED_COUNT=$(echo "$WATCHED" | jq 'length')
 ORG_COUNT=$(echo "$ORG_REPOS" | jq 'length')
