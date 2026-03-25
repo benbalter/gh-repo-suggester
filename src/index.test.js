@@ -1,37 +1,16 @@
-const { describe, it, beforeEach, mock } = require("node:test");
+const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 
-// Stub @actions/core
-const coreStub = {
-  inputs: {},
-  outputs: {},
-  getInput(name) {
-    return this.inputs[name] || "";
-  },
-  setOutput(name, value) {
-    this.outputs[name] = value;
-  },
-  setFailed(msg) {
-    this.failedMessage = msg;
-  },
-  info() {},
-  summary: {
-    addHeading() { return this; },
-    addRaw() { return this; },
-    write() { return Promise.resolve(); },
-  },
-};
-
 describe("summarizeRepo", () => {
-  // We can't easily require index.js because it calls run() on load,
-  // so we test the logic inline here.
-  it("extracts key fields from a repo object", () => {
+  it("extracts key fields including discussion/issue flags", () => {
     const repo = {
       full_name: "org/repo",
       description: "A cool repo",
       language: "JavaScript",
       topics: ["api", "rest"],
       stargazers_count: 42,
+      has_discussions: true,
+      has_issues: true,
     };
     const summary = {
       name: repo.full_name,
@@ -39,6 +18,8 @@ describe("summarizeRepo", () => {
       language: repo.language || "unknown",
       topics: (repo.topics || []).join(", "),
       stars: repo.stargazers_count,
+      has_discussions: repo.has_discussions || false,
+      has_issues: repo.has_issues || false,
     };
     assert.deepStrictEqual(summary, {
       name: "org/repo",
@@ -46,6 +27,8 @@ describe("summarizeRepo", () => {
       language: "JavaScript",
       topics: "api, rest",
       stars: 42,
+      has_discussions: true,
+      has_issues: true,
     });
   });
 
@@ -63,6 +46,8 @@ describe("summarizeRepo", () => {
       language: repo.language || "unknown",
       topics: (repo.topics || []).join(", "),
       stars: repo.stargazers_count,
+      has_discussions: repo.has_discussions || false,
+      has_issues: repo.has_issues || false,
     };
     assert.deepStrictEqual(summary, {
       name: "org/bare",
@@ -70,28 +55,30 @@ describe("summarizeRepo", () => {
       language: "unknown",
       topics: "",
       stars: 0,
+      has_discussions: false,
+      has_issues: false,
     });
   });
 });
 
 describe("candidate filtering logic", () => {
-  it("filters out already-starred and archived repos", () => {
-    const starred = [{ full_name: "org/starred-one" }];
+  it("filters out already-watched and archived repos", () => {
+    const watched = [{ full_name: "org/watched-one" }];
     const orgRepos = [
-      { full_name: "org/starred-one", archived: false },
+      { full_name: "org/watched-one", archived: false },
       { full_name: "org/archived", archived: true },
       { full_name: "org/candidate", archived: false },
     ];
-    const starredNames = new Set(starred.map((r) => r.full_name));
+    const watchedNames = new Set(watched.map((r) => r.full_name));
     const candidates = orgRepos.filter(
-      (r) => !starredNames.has(r.full_name) && !r.archived,
+      (r) => !watchedNames.has(r.full_name) && !r.archived,
     );
     assert.equal(candidates.length, 1);
     assert.equal(candidates[0].full_name, "org/candidate");
   });
 
-  it("returns empty when all repos are starred", () => {
-    const starred = [
+  it("returns empty when all repos are watched", () => {
+    const watched = [
       { full_name: "org/a" },
       { full_name: "org/b" },
     ];
@@ -99,9 +86,9 @@ describe("candidate filtering logic", () => {
       { full_name: "org/a", archived: false },
       { full_name: "org/b", archived: false },
     ];
-    const starredNames = new Set(starred.map((r) => r.full_name));
+    const watchedNames = new Set(watched.map((r) => r.full_name));
     const candidates = orgRepos.filter(
-      (r) => !starredNames.has(r.full_name) && !r.archived,
+      (r) => !watchedNames.has(r.full_name) && !r.archived,
     );
     assert.equal(candidates.length, 0);
   });
@@ -122,5 +109,20 @@ describe("topic filtering", () => {
     );
     assert.equal(filtered.length, 1);
     assert.equal(filtered[0].full_name, "org/api-lib");
+  });
+});
+
+describe("watch types", () => {
+  it("defines all five GitHub watching types", () => {
+    const WATCH_TYPES = [
+      "All Activity — every notification (issues, PRs, releases, discussions, etc.)",
+      "Issues and Pull Requests — stay in the loop on development activity",
+      "Releases Only — get notified of new versions",
+      "Discussions — follow community conversations",
+      "Security Alerts — stay aware of vulnerabilities",
+    ];
+    assert.equal(WATCH_TYPES.length, 5);
+    assert.ok(WATCH_TYPES[0].startsWith("All Activity"));
+    assert.ok(WATCH_TYPES[2].startsWith("Releases Only"));
   });
 });

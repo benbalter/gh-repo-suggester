@@ -5,7 +5,7 @@ on:
     - cron: '0 9 * * 1' # Every Monday at 9 AM UTC
 
 permissions:
-  contents: read
+  models: read
 
 jobs:
   suggest:
@@ -14,4 +14,3 @@ jobs:
       - uses: benbalter/repo-suggester@main
         with:
           org: github
-          token: ${{ secrets.MODELS_PAT }}
