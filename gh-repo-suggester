@@ -129,49 +129,62 @@ WATCHED_LIST=$(echo "$WATCHED" | jq -r '
 ')
 
 CANDIDATE_LIST=$(echo "$CANDIDATES" | jq -r '
-  .[] | "- \(.name) (\(.language), ★\(.stars)): \(.description) [topics: \(.topics), discussions: \(.has_discussions), issues: \(.has_issues)]"
+  .[] | "- \(.name) (\(.language), \(.stars)★): \(.description) [topics: \(.topics), discussions: \(.has_discussions), issues: \(.has_issues)]"
 ')
 
-read -r -d '' PROMPT <<PROMPT_EOF || true
-You recommend GitHub repositories to watch. Given the user's currently watched repos (showing their interests), pick the ${COUNT} best repos from the "${ORG}" organization for them to watch.
+read -r -d '' SYSTEM_PROMPT <<'SYSTEM_EOF' || true
+You are an expert at recommending GitHub repositories. You analyze a user's
+watched repos to infer their interests, then match those interests against
+candidate repos in a specific organization.
 
-## User's currently watched repos:
+## Your process
+
+1. Identify 3-5 interest themes from the user's watched repos (e.g. languages,
+   domains, tooling patterns).
+2. Score each candidate repo against those themes.
+3. Select the top candidates, preferring diversity across themes over clustering
+   on a single theme.
+4. For each pick, choose the most appropriate GitHub watching type:
+
+   - "All Activity" — the repo is central to the user's day-to-day work
+   - "Issues and Pull Requests" — the user would likely contribute or follow
+     development closely
+   - "Releases Only" — the repo is a library, CLI tool, or dependency where
+     only new versions matter
+   - "Discussions" — the repo has discussions enabled AND aligns with the
+     user's community interests
+   - "Security Alerts" — the repo is an infrastructure or security-sensitive
+     dependency
+
+   Use the candidate metadata (has_discussions, has_issues, stars, language) to
+   inform the watch type. Do NOT suggest "Discussions" if discussions are false.
+
+## Output format
+
+Return ONLY the recommendations in this exact format (no preamble, no summary):
+
+<number>. <repo-name>
+   Watch: <watching type>
+   Why:   <One concise sentence connecting the repo to specific user interests>
+
+Use just the repo name (without the org prefix).
+SYSTEM_EOF
+
+read -r -d '' USER_PROMPT <<USER_EOF || true
+Recommend ${COUNT} repos from the "${ORG}" organization for me to watch.
+
+## My currently watched repos:
 ${WATCHED_LIST}
 
 ## Candidate repos in ${ORG}:
 ${CANDIDATE_LIST}
-
-## GitHub watching types:
-- All Activity — every notification (issues, PRs, releases, discussions, etc.)
-- Issues and Pull Requests — stay in the loop on development activity
-- Releases Only — get notified of new versions
-- Discussions — follow community conversations
-- Security Alerts — stay aware of vulnerabilities
-
-Return EXACTLY ${COUNT} recommendations (or fewer if there aren't enough good matches).
-For each, output this format:
-
-### <number>. <org>/<repo-name>
-
-**Suggested watch type:** <one of the watching types above>
-
-<One-sentence reason tied to the user's watched repos or interests, and why the suggested watch type fits>
-
-Choose the watch type based on the repo's characteristics:
-- Recommend "Releases Only" for libraries or tools the user likely depends on
-- Recommend "Discussions" for repos with discussions enabled that match community interests
-- Recommend "Issues and Pull Requests" for repos the user might want to contribute to
-- Recommend "Security Alerts" for dependencies or security-sensitive repos
-- Recommend "All Activity" only for repos closely aligned with the user's core work
-
-Do NOT recommend repos the user already watches. Be specific about *why* each repo matches.
-PROMPT_EOF
+USER_EOF
 
 # ── Call GitHub Models ───────────────────────────────────────────────
 
-BODY=$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" '{
+BODY=$(jq -n --arg model "$MODEL" --arg system "$SYSTEM_PROMPT" --arg user "$USER_PROMPT" '{
   model:       $model,
-  messages:    [{role: "user", content: $prompt}],
+  messages:    [{role: "system", content: $system}, {role: "user", content: $user}],
   temperature: 0.7
 }')
 
